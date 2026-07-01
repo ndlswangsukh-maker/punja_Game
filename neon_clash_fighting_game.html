@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEON CLASH — 2D Fighting Arcade</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: radial-gradient(ellipse at center, #1a0b2e 0%, #0a0414 60%, #000000 100%);
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column;
+    font-family: 'Courier New', Courier, monospace;
+    overflow: hidden;
+  }
+  #wrap {
+    position: relative;
+    width: 960px;
+    max-width: 100vw;
+  }
+  #game {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #000;
+    border: 3px solid #00eaff;
+    box-shadow: 0 0 15px #00eaff, 0 0 35px #ff00e6 inset, 0 0 60px rgba(0,234,255,0.35);
+    border-radius: 6px;
+  }
+  #hint {
+    color: #7bf3ff;
+    text-align: center;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    margin-top: 10px;
+    text-shadow: 0 0 6px #00eaff;
+    padding: 0 8px;
+  }
+  #overlay {
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(5,0,15,0.78);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border-radius: 6px;
+  }
+  #overlay.hidden { display: none; }
+  #koLabel {
+    font-size: 74px;
+    font-weight: bold;
+    color: #ff1744;
+    letter-spacing: 10px;
+    text-shadow: 0 0 20px #ff1744, 0 0 45px #ff1744, 0 0 8px #fff;
+    animation: koPulse 0.6s ease-in-out infinite alternate;
+  }
+  @keyframes koPulse {
+    from { transform: scale(1); }
+    to { transform: scale(1.08); }
+  }
+  #winnerLabel {
+    font-size: 26px;
+    color: #ffe066;
+    text-shadow: 0 0 12px #ffe066, 0 0 24px #ff8c00;
+    margin-top: 14px;
+    letter-spacing: 3px;
+  }
+  #replayBtn {
+    margin-top: 30px;
+    padding: 14px 34px;
+    font-size: 18px;
+    font-family: inherit;
+    letter-spacing: 2px;
+    color: #00eaff;
+    background: rgba(0,234,255,0.08);
+    border: 2px solid #00eaff;
+    border-radius: 4px;
+    cursor: pointer;
+    text-shadow: 0 0 8px #00eaff;
+    box-shadow: 0 0 12px rgba(0,234,255,0.5);
+    transition: all 0.15s ease;
+  }
+  #replayBtn:hover {
+    background: #00eaff;
+    color: #001018;
+    box-shadow: 0 0 25px #00eaff;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="overlay" class="hidden">
+    <div id="koLabel">K.O.</div>
+    <div id="winnerLabel">PLAYER 1 WINS!</div>
+    <button id="replayBtn">PLAY AGAIN</button>
+  </div>
+</div>
+<div id="hint">
+  P1 : A/D เดิน &nbsp;•&nbsp; W กระโดด &nbsp;•&nbsp; S ก้ม &nbsp;•&nbsp; J ต่อยเบา &nbsp;•&nbsp; K เตะหนัก &nbsp;•&nbsp; L ป้องกัน &nbsp;•&nbsp; SPACE ท่าไม้ตาย
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  P2 : ←/→ เดิน &nbsp;•&nbsp; ↑ กระโดด &nbsp;•&nbsp; ↓ ก้ม &nbsp;•&nbsp; 1 ต่อยเบา &nbsp;•&nbsp; 2 เตะหนัก &nbsp;•&nbsp; 3 ป้องกัน &nbsp;•&nbsp; ENTER ท่าไม้ตาย
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ============================================================
+  //  SETUP พื้นฐาน / CANVAS
+  // ============================================================
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const CANVAS_W = canvas.width;
+  const CANVAS_H = canvas.height;
+
+  const GROUND_Y = 440;      // ตำแหน่ง Y ของพื้น (จุดที่เท้าตัวละครแตะ)
+  const ARENA_LEFT = 40;
+  const ARENA_RIGHT = 920;
+  const GRAVITY = 2200;      // px/s^2
+  const MOVE_SPEED = 260;    // px/s
+  const JUMP_VELOCITY = -760;// px/s
+
+  // ข้อมูลท่าโจมตี: startup -> active (โดนจริง) -> recovery
+  const ATTACKS = {
+    punch: { dur: 0.28, activeFrom: 0.08, activeTo: 0.16, dmg: 6,  hitstun: 0.22, push: 70,  rangeX: 62, rangeY: 46, energy: 8  },
+    kick:  { dur: 0.48, activeFrom: 0.15, activeTo: 0.27, dmg: 13, hitstun: 0.38, push: 130, rangeX: 78, rangeY: 56, energy: 14 }
+  };
+  const SPECIAL_DUR = 0.35;
+  const SPECIAL_DMG = 26;
+
+  // ============================================================
+  //  STATE ตัวละคร (Fighter Object)
+  // ============================================================
+  function createFighter(x, color, glow, facing, name, keys){
+    return {
+      x, y: GROUND_Y, vx: 0, vy: 0,
+      width: 56, standHeight: 118, crouchHeight: 78, height: 118,
+      facing, color, glow, name, keys,
+      hp: 100, maxHp: 100, displayHp: 100,
+      energy: 0, maxEnergy: 100, displayEnergy: 0,
+      grounded: true, crouching: false, blocking: false,
+      attackType: null, attackTimer: 0, attackHit: false,
+      hurtTimer: 0, comboCount: 0, lastHitTime: -99999,
+      state: 'idle', won: false, flicker: 0
+    };
+  }
+
+  const P1_KEYS = { left:'KeyA', right:'KeyD', up:'KeyW', down:'KeyS', punch:'KeyJ', kick:'KeyK', block:'KeyL', special:'Space' };
+  const P2_KEYS = { left:'ArrowLeft', right:'ArrowRight', up:'ArrowUp', down:'ArrowDown', punch:'Digit1', kick:'Digit2', block:'Digit3', special:'Enter' };
+
+  let p1 = createFighter(260, '#00eaff', '#00eaff', 1,  'PLAYER 1', P1_KEYS);
+  let p2 = createFighter(700, '#ff2fd6', '#ff2fd6', -1, 'PLAYER 2', P2_KEYS);
+
+  let projectiles = [];   // ท่าไม้ตายที่พุ่งออกไป
+  let particles = [];     // ละอองไฟเวลาโดนตี
+  let comboTexts = [];    // ข้อความ "2 HIT!" ลอยขึ้น
+  let shakeMag = 0;       // ความแรงของ Screen Shake
+  let timeLeft = 99;
+  let roundEnded = false;
+
+  // ============================================================
+  //  INPUT
+  // ============================================================
+  const keysDown = new Set();
+  const usedCodes = new Set(Object.values(P1_KEYS).concat(Object.values(P2_KEYS)));
+
+  window.addEventListener('keydown', (e) => {
+    if (usedCodes.has(e.code)) e.preventDefault();
+    if (!keysDown.has(e.code)) {
+      handleKeyDownOnce(e.code);
+    }
+    keysDown.add(e.code);
+  });
+  window.addEventListener('keyup', (e) => {
+    keysDown.delete(e.code);
+  });
+
+  // Action ที่ต้อง "กดครั้งเดียว" ไม่ยิงซ้ำตอนกดค้าง เช่น กระโดด/ต่อย/เตะ/ท่าไม้ตาย
+  function handleKeyDownOnce(code){
+    if (code === p1.keys.up) tryJump(p1);
+    if (code === p2.keys.up) tryJump(p2);
+    if (code === p1.keys.punch) tryAttack(p1, 'punch');
+    if (code === p2.keys.punch) tryAttack(p2, 'punch');
+    if (code === p1.keys.kick) tryAttack(p1, 'kick');
+    if (code === p2.keys.kick) tryAttack(p2, 'kick');
+    if (code === p1.keys.special) trySpecial(p1);
+    if (code === p2.keys.special) trySpecial(p2);
+  }
+
+  function tryJump(f){
+    if (roundEnded) return;
+    if (f.grounded && f.state !== 'attack' && f.hurtTimer <= 0 && f.state !== 'ko' && !f.blocking) {
+      f.vy = JUMP_VELOCITY;
+      f.grounded = false;
+      f.state = 'jump';
+    }
+  }
+
+  function tryAttack(f, type){
+    if (roundEnded) return;
+    if (f.attackType || f.hurtTimer > 0 || f.state === 'ko' || f.blocking) return;
+    f.attackType = type;
+    f.attackTimer = 0;
+    f.attackHit = false;
+    f.state = 'attack';
+  }
+
+  function trySpecial(f){
+    if (roundEnded) return;
+    if (f.energy < f.maxEnergy) return;
+    if (f.attackType || f.hurtTimer > 0 || f.state === 'ko') return;
+    f.energy = 0;
+    f.attackType = 'special';
+    f.attackTimer = 0;
+    f.state = 'attack';
+    spawnProjectile(f);
+  }
+
+  // ============================================================
+  //  HELPER: กล่องชนกัน (Hitbox / Hurtbox)
+  // ============================================================
+  function rectsOverlap(a, b){
+    return a.x < b.x + b.w && a.x + a.w > b.x &&
+           a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+  function getHurtbox(f){
+    return { x: f.x - f.width/2, y: f.y - f.height, w: f.width, h: f.height };
+  }
+  function getAttackHitbox(f, data){
+    const cx = f.x + f.facing * (data.rangeX/2 + f.width/2 - 8);
+    const cy = f.y - f.height * 0.55;
+    return { x: cx - data.rangeX/2, y: cy - data.rangeY/2, w: data.rangeX, h: data.rangeY };
+  }
+
+  // ============================================================
+  //  ท่าไม้ตาย (Special Projectile)
+  // ============================================================
+  function spawnProjectile(f){
+    projectiles.push({
+      x: f.x + f.facing * 44,
+      y: f.y - f.height * 0.55,
+      vx: f.facing * 640,
+      w: 42, h: 22,
+      owner: f, life: 2.2, dead: false
+    });
+  }
+
+  function updateProjectiles(dt){
+    for (const pr of projectiles){
+      pr.x += pr.vx * dt;
+      pr.life -= dt;
+      // ทิ้งประกายแสงตามหลัง
+      if (Math.random() < 0.6){
+        particles.push({
+          x: pr.x, y: pr.y, vx: -pr.vx*0.1 + (Math.random()-0.5)*40, vy: (Math.random()-0.5)*40,
+          life: 0.25, maxLife: 0.25, color: pr.owner === p1 ? '#00eaff' : '#ff2fd6', size: 2 + Math.random()*2
+        });
+      }
+    }
+    for (const pr of projectiles){
+      if (pr.dead || roundEnded) continue;
+      const target = pr.owner === p1 ? p2 : p1;
+      if (target.state === 'ko') continue;
+      const hb = { x: pr.x - pr.w/2, y: pr.y - pr.h/2, w: pr.w, h: pr.h };
+      if (rectsOverlap(hb, getHurtbox(target))){
+        applyHit(pr.owner, target, SPECIAL_DMG, 0.5, 170, true);
+        pr.dead = true;
+      }
+    }
+    projectiles = projectiles.filter(pr => !pr.dead && pr.life > 0 && pr.x > -80 && pr.x < CANVAS_W + 80);
+  }
+
+  // ============================================================
+  //  ระบบโดนตี / Damage / Combo / Block
+  // ============================================================
+  function applyHit(attacker, defender, dmg, hitstun, pushback, isProjectile){
+    if (defender.state === 'ko') return;
+    const now = performance.now();
+    const dir = attacker.x < defender.x ? 1 : -1;
+
+    if (defender.blocking && defender.grounded && !isProjectile) {
+      // ป้องกันสำเร็จ: ลดดาเมจ 80%, ไม่มีอาการชะงัก (hitstun)
+      defender.hp = Math.max(0, defender.hp - dmg * 0.2);
+      defender.vx = dir * pushback * 1.2;
+      spawnBlockSparks(defender, dir);
+      screenShake(4);
+    } else if (defender.blocking && defender.grounded && isProjectile) {
+      // ป้องกันท่าไม้ตายได้เช่นกัน
+      defender.hp = Math.max(0, defender.hp - dmg * 0.2);
+      defender.vx = dir * pushback * 1.2;
+      spawnBlockSparks(defender, dir);
+      screenShake(6);
+    } else {
+      defender.hp = Math.max(0, defender.hp - dmg);
+      defender.hurtTimer = hitstun;
+      defender.state = 'hurt';
+      defender.vx = dir * pushback * 3.2;
+      defender.crouching = false;
+      spawnHitSparks(defender);
+      screenShake(isProjectile ? 12 : 7);
+
+      // ระบบคอมโบ: โจมตีต่อเนื่องภายใน 1.1 วิ นับเป็นคอมโบ
+      if (now - attacker.lastHitTime < 1100) {
+        attacker.comboCount++;
+      } else {
+        attacker.comboCount = 1;
+      }
+      attacker.lastHitTime = now;
+      if (attacker.comboCount >= 2) {
+        spawnComboText(defender, attacker.comboCount);
+      }
+
+      if (defender.hp <= 0) {
+        defender.hp = 0;
+        defender.state = 'ko';
+        endRound(attacker);
+      }
+    }
+
+    if (!isProjectile) {
+      attacker.energy = Math.min(attacker.maxEnergy, attacker.energy + (dmg >= 10 ? 14 : 8));
+    }
+  }
+
+  function resolveHits(attacker, defender){
+    if (roundEnded) return;
+    if (attacker.attackType !== 'punch' && attacker.attackType !== 'kick') return;
+    if (attacker.attackHit) return;
+    const data = ATTACKS[attacker.attackType];
+    const t = attacker.attackTimer;
+    if (t < data.activeFrom || t > data.activeTo) return;
+    const hb = getAttackHitbox(attacker, data);
+    const hurt = getHurtbox(defender);
+    if (rectsOverlap(hb, hurt) && defender.state !== 'ko') {
+      attacker.attackHit = true;
+      applyHit(attacker, defender, data.dmg, data.hitstun, data.push, false);
+    }
+  }
+
+  // ============================================================
+  //  PARTICLES / EFFECTS
+  // ============================================================
+  function spawnHitSparks(defender){
+    const hx = defender.x - defender.facing * 6;
+    const hy = defender.y - defender.height * 0.6;
+    for (let i = 0; i < 16; i++){
+      const ang = Math.random() * Math.PI * 2;
+      const spd = 100 + Math.random() * 240;
+      particles.push({
+        x: hx, y: hy,
+        vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd - 60,
+        life: 0.35 + Math.random() * 0.3, maxLife: 0.65,
+        color: Math.random() < 0.5 ? '#ffe066' : '#ff6b35',
+        size: 2 + Math.random() * 3
+      });
+    }
+  }
+  function spawnBlockSparks(defender, dir){
+    const hx = defender.x - dir * defender.width/2;
+    const hy = defender.y - defender.height * 0.6;
+    for (let i = 0; i < 10; i++){
+      const ang = Math.random() * Math.PI * 2;
+      const spd = 60 + Math.random() * 150;
+      particles.push({
+        x: hx, y: hy,
+        vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd - 30,
+        life: 0.25 + Math.random() * 0.2, maxLife: 0.45,
+        color: '#4dd9ff', size: 2 + Math.random() * 2
+      });
+    }
+  }
+  function spawnComboText(defender, count){
+    let text = count + ' HIT!';
+    if (count === 3) text = count + ' HIT! GREAT!';
+    else if (count >= 4) text = count + ' HIT COMBO!!';
+    comboTexts.push({ x: defender.x, y: defender.y - defender.height - 30, text, life: 1.0, vy: -55 });
+  }
+  function screenShake(mag){ shakeMag = Math.max(shakeMag, mag); }
+
+  function updateParticles(dt){
+    for (const p of particles){
+      p.vy += 500 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.life -= dt;
+    }
+    particles = particles.filter(p => p.life > 0);
+  }
+  function updateComboTexts(dt){
+    for (const c of comboTexts){
+      c.y += c.vy * dt;
+      c.life -= dt;
+    }
+    comboTexts = comboTexts.filter(c => c.life > 0);
+  }
+
+  // ============================================================
+  //  PHYSICS / MOVEMENT UPDATE
+  // ============================================================
+  function updateFighter(f, other, dt){
+    // หันหน้าเข้าหาคู่ต่อสู้เสมอ ยกเว้นตอนกำลังโจมตี/โดนตี
+    if (f.state !== 'attack' && f.hurtTimer <= 0 && !roundEnded) {
+      f.facing = f.x < other.x ? 1 : -1;
+    }
+
+    const canAct = f.hurtTimer <= 0 && f.state !== 'ko' && !roundEnded;
+    const input = f.keys;
+
+    if (canAct && f.state !== 'attack') {
+      f.blocking = keysDown.has(input.block) && f.grounded;
+      if (f.blocking) {
+        f.vx *= Math.pow(0.0005, dt);
+        f.crouching = false;
+        f.state = 'block';
+      } else if (keysDown.has(input.down) && f.grounded) {
+        f.crouching = true;
+        f.vx *= Math.pow(0.0005, dt);
+        f.state = 'crouch';
+      } else {
+        f.crouching = false;
+        let mv = 0;
+        if (keysDown.has(input.left)) mv -= 1;
+        if (keysDown.has(input.right)) mv += 1;
+        f.vx = mv * MOVE_SPEED;
+        f.state = f.grounded ? (mv !== 0 ? 'walk' : 'idle') : 'jump';
+      }
+    } else if (f.hurtTimer > 0) {
+      f.state = 'hurt';
+      f.blocking = false;
+      f.crouching = false;
+      f.vx *= Math.pow(0.001, dt); // แรงถอยหลังค่อยๆ หน่วงลง (friction)
+    } else if (f.attackType) {
+      f.vx *= Math.pow(0.0005, dt);
+    }
+
+    // แรงโน้มถ่วง
+    if (!f.grounded) f.vy += GRAVITY * dt;
+
+    f.x += f.vx * dt;
+    f.y += f.vy * dt;
+
+    // ชนพื้น
+    if (f.y >= GROUND_Y) {
+      f.y = GROUND_Y;
+      f.vy = 0;
+      f.grounded = true;
+    } else {
+      f.grounded = false;
+    }
+
+    // ขอบเวที
+    const halfW = f.width / 2;
+    if (f.x < ARENA_LEFT + halfW) f.x = ARENA_LEFT + halfW;
+    if (f.x > ARENA_RIGHT - halfW) f.x = ARENA_RIGHT - halfW;
+
+    f.height = f.crouching ? f.crouchHeight : f.standHeight;
+
+    // นับเวลาชะงักจากการโดนตี
+    if (f.hurtTimer > 0) {
+      f.hurtTimer -= dt;
+      if (f.hurtTimer <= 0) {
+        f.hurtTimer = 0;
+        f.state = f.grounded ? 'idle' : 'jump';
+      }
+    }
+
+    f.flicker += dt;
+  }
+
+  function updateAttack(f, dt){
+    if (f.attackType) {
+      f.attackTimer += dt;
+      const dur = f.attackType === 'special' ? SPECIAL_DUR : ATTACKS[f.attackType].dur;
+      if (f.attackTimer >= dur) {
+        f.attackType = null;
+        f.state = f.grounded ? 'idle' : 'jump';
+      }
+    }
+  }
+
+  function separateFighters(a, b){
+    const minDist = (a.width + b.width) / 2 - 8;
+    const dist = b.x - a.x;
+    const adist = Math.abs(dist);
+    if (adist < minDist && adist > 0.01) {
+      const overlap = minDist - adist;
+      const dir = dist > 0 ? 1 : -1;
+      a.x -= dir * overlap / 2;
+      b.x += dir * overlap / 2;
+    }
+  }
+
+  // ============================================================
+  //  ROUND END / RESET
+  // ============================================================
+  function endRound(winner){
+    if (roundEnded) return;
+    roundEnded = true;
+    winner.won = true;
+    showOverlay(winner.name + ' WINS!');
+  }
+  function endRoundByTime(){
+    if (roundEnded) return;
+    roundEnded = true;
+    let winner = null;
+    if (p1.hp > p2.hp) winner = p1;
+    else if (p2.hp > p1.hp) winner = p2;
+    if (winner) {
+      winner.won = true;
+      showOverlay(winner.name + ' WINS!');
+    } else {
+      showOverlay('DRAW GAME!');
+    }
+  }
+  function showOverlay(text){
+    document.getElementById('winnerLabel').textContent = text;
+    document.getElementById('overlay').classList.remove('hidden');
+  }
+  function resetGame(){
+    Object.assign(p1, createFighter(260, '#00eaff', '#00eaff', 1, 'PLAYER 1', P1_KEYS));
+    Object.assign(p2, createFighter(700, '#ff2fd6', '#ff2fd6', -1, 'PLAYER 2', P2_KEYS));
+    projectiles = []; particles = []; comboTexts = [];
+    timeLeft = 99;
+    roundEnded = false;
+    shakeMag = 0;
+    document.getElementById('overlay').classList.add('hidden');
+  }
+  document.getElementById('replayBtn').addEventListener('click', resetGame);
+
+  // ============================================================
+  //  MAIN UPDATE LOOP
+  // ============================================================
+  function update(dt){
+    if (!roundEnded) {
+      timeLeft -= dt;
+      if (timeLeft <= 0) { timeLeft = 0; endRoundByTime(); }
+    }
+
+    updateFighter(p1, p2, dt);
+    updateFighter(p2, p1, dt);
+    separateFighters(p1, p2);
+
+    updateAttack(p1, dt);
+    updateAttack(p2, dt);
+
+    resolveHits(p1, p2);
+    resolveHits(p2, p1);
+
+    updateProjectiles(dt);
+    updateParticles(dt);
+    updateComboTexts(dt);
+
+    // แถบเลือด/พลัง ค่อยๆ วูบลง (smooth interpolation) แทนที่จะกระโดดทันที
+    p1.displayHp += (p1.hp - p1.displayHp) * Math.min(1, dt * 5.5);
+    p2.displayHp += (p2.hp - p2.displayHp) * Math.min(1, dt * 5.5);
+    p1.displayEnergy += (p1.energy - p1.displayEnergy) * Math.min(1, dt * 8);
+    p2.displayEnergy += (p2.energy - p2.displayEnergy) * Math.min(1, dt * 8);
+
+    shakeMag *= Math.pow(0.0008, dt);
+    if (shakeMag < 0.05) shakeMag = 0;
+  }
+
+  // ============================================================
+  //  DRAWING
+  // ============================================================
+  function drawBackground(){
+    // พื้นหลังไล่สี Cyberpunk
+    const grad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
+    grad.addColorStop(0, '#170a2e');
+    grad.addColorStop(0.55, '#0c0620');
+    grad.addColorStop(1, '#05030d');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // ดวงอาทิตย์นีออนที่เส้นขอบฟ้า
+    const sunY = GROUND_Y - 140;
+    const sunGrad = ctx.createLinearGradient(0, sunY - 90, 0, sunY + 90);
+    sunGrad.addColorStop(0, 'rgba(255,45,214,0.9)');
+    sunGrad.addColorStop(1, 'rgba(0,234,255,0.15)');
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(CANVAS_W/2, sunY, 90, 0, Math.PI*2);
+    ctx.fillStyle = sunGrad;
+    ctx.globalAlpha = 0.35;
+    ctx.fill();
+    ctx.restore();
+
+    // เส้นตารางไกลโพ้น (grid perspective)
+    ctx.save();
+    ctx.strokeStyle = 'rgba(0,234,255,0.25)';
+    ctx.lineWidth = 1;
+    const vanishX = CANVAS_W/2, vanishY = GROUND_Y - 60;
+    for (let i = -8; i <= 8; i++){
+      const bx = CANVAS_W/2 + i * 90;
+      ctx.beginPath();
+      ctx.moveTo(vanishX, vanishY);
+      ctx.lineTo(bx, GROUND_Y + 60);
+      ctx.stroke();
+    }
+    for (let j = 0; j < 5; j++){
+      const t = j / 4;
+      const y = vanishY + t * (GROUND_Y + 60 - vanishY);
+      ctx.beginPath();
+      ctx.moveTo(vanishX - 8*90*t, y);
+      ctx.lineTo(vanishX + 8*90*t, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawGround(){
+    ctx.save();
+    ctx.shadowColor = '#00eaff';
+    ctx.shadowBlur = 18;
+    ctx.strokeStyle = '#00eaff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, GROUND_Y + 2);
+    ctx.lineTo(CANVAS_W, GROUND_Y + 2);
+    ctx.stroke();
+    ctx.restore();
+
+    const floorGrad = ctx.createLinearGradient(0, GROUND_Y, 0, CANVAS_H);
+    floorGrad.addColorStop(0, 'rgba(0,234,255,0.12)');
+    floorGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(0, GROUND_Y, CANVAS_W, CANVAS_H - GROUND_Y);
+  }
+
+  function roundRect(x, y, w, h, r){
+    ctx.beginPath();
+    ctx.moveTo(x+r, y);
+    ctx.arcTo(x+w, y, x+w, y+h, r);
+    ctx.arcTo(x+w, y+h, x, y+h, r);
+    ctx.arcTo(x, y+h, x, y, r);
+    ctx.arcTo(x, y, x+w, y, r);
+    ctx.closePath();
+  }
+
+  function drawFighter(f){
+    ctx.save();
+    const flashHurt = f.state === 'hurt' && Math.floor(f.flicker * 20) % 2 === 0;
+    const bodyColor = flashHurt ? '#ffffff' : f.color;
+
+    ctx.shadowColor = f.glow;
+    ctx.shadowBlur = f.state === 'attack' ? 28 : 16;
+
+    const bx = f.x - f.width/2;
+    const by = f.y - f.height;
+
+    // ตัวลำตัว
+    ctx.fillStyle = bodyColor;
+    roundRect(bx, by, f.width, f.height, 10);
+    ctx.fill();
+
+    // เส้นตัดกลางตัว (ดีไซน์ชุดนักสู้)
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(f.x, by + 10);
+    ctx.lineTo(f.x, by + f.height - 10);
+    ctx.stroke();
+
+    // หัว
+    const headR = 15;
+    const headY = by - headR + 4;
+    ctx.beginPath();
+    ctx.arc(f.x, headY, headR, 0, Math.PI*2);
+    ctx.fillStyle = bodyColor;
+    ctx.fill();
+
+    // ตา/วิซอร์บอกทิศทาง
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(f.x + f.facing*5, headY - 1, 3, 0, Math.PI*2);
+    ctx.fill();
+
+    // แขน/ขา ยื่นออกตอนโจมตี
+    if (f.attackType === 'punch') {
+      const t = Math.min(1, f.attackTimer / (ATTACKS.punch.activeTo));
+      const armLen = 46 * Math.sin(Math.min(1,t) * Math.PI);
+      ctx.fillStyle = bodyColor;
+      roundRect(f.x + f.facing*(f.width/2-4), by + f.height*0.32, f.facing*armLen, 14, 6);
+      ctx.fill();
+    } else if (f.attackType === 'kick') {
+      const t = Math.min(1, f.attackTimer / (ATTACKS.kick.activeTo));
+      const legLen = 56 * Math.sin(Math.min(1,t) * Math.PI);
+      ctx.fillStyle = bodyColor;
+      roundRect(f.x + f.facing*(f.width/2-4), by + f.height*0.62, f.facing*legLen, 16, 6);
+      ctx.fill();
+    } else if (f.attackType === 'special') {
+      // ท่ายืนปล่อยพลัง เรืองแสงแรง
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      ctx.arc(f.x + f.facing*20, by + f.height*0.4, 24, 0, Math.PI*2);
+      ctx.fillStyle = f.glow;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // โล่ป้องกันเวลา Block
+    if (f.blocking) {
+      ctx.save();
+      ctx.strokeStyle = '#4dd9ff';
+      ctx.lineWidth = 4;
+      ctx.shadowColor = '#4dd9ff';
+      ctx.shadowBlur = 20;
+      ctx.beginPath();
+      ctx.ellipse(f.x + f.facing*(f.width/2+6), by + f.height*0.5, 14, f.height*0.42, 0, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  function drawProjectiles(){
+    for (const pr of projectiles){
+      ctx.save();
+      const color = pr.owner === p1 ? '#00eaff' : '#ff2fd6';
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 25;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.ellipse(pr.x, pr.y, pr.w/2, pr.h/2, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawParticles(){
+    for (const p of particles){
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+      ctx.fillStyle = p.color;
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawComboTexts(){
+    for (const c of comboTexts){
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, c.life);
+      ctx.font = 'bold 26px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffe066';
+      ctx.shadowColor = '#ff8c00';
+      ctx.shadowBlur = 14;
+      ctx.fillText(c.text, c.x, c.y);
+      ctx.restore();
+    }
+  }
+
+  function drawHpBar(f, x, alignRight){
+    const barW = 340, barH = 26;
+    ctx.save();
+    // กรอบ
+    ctx.strokeStyle = f.glow;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = f.glow;
+    ctx.shadowBlur = 8;
+    ctx.strokeRect(x, 44, barW, barH);
+
+    // พื้นหลังหลอด
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fillRect(x, 44, barW, barH);
+
+    // ค่าพลังเลือดจริง (สีเข้ม แสดงส่วนที่กำลังจะลด)
+    const pct = f.displayHp / f.maxHp;
+    const w = barW * pct;
+    let hpColor = '#39ff6a';
+    if (pct < 0.5) hpColor = '#ffe066';
+    if (pct < 0.22) hpColor = '#ff3b3b';
+
+    const fillX = alignRight ? x + barW - w : x;
+    const hpGrad = ctx.createLinearGradient(fillX, 0, fillX + w, 0);
+    hpGrad.addColorStop(0, hpColor);
+    hpGrad.addColorStop(1, '#ffffff');
+    ctx.fillStyle = hpGrad;
+    ctx.fillRect(fillX, 44, w, barH);
+    ctx.restore();
+
+    // ชื่อผู้เล่น
+    ctx.save();
+    ctx.font = 'bold 15px Courier New';
+    ctx.fillStyle = f.glow;
+    ctx.shadowColor = f.glow;
+    ctx.shadowBlur = 6;
+    ctx.textAlign = alignRight ? 'right' : 'left';
+    ctx.fillText(f.name, alignRight ? x + barW : x, 36);
+    ctx.restore();
+
+    // แถบพลัง Energy ด้านล่าง HP
+    const eBarH = 10;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, 74, barW, eBarH);
+    const ePct = f.displayEnergy / f.maxEnergy;
+    const ew = barW * ePct;
+    const efillX = alignRight ? x + barW - ew : x;
+    const full = f.energy >= f.maxEnergy;
+    ctx.fillStyle = full ? '#ffffff' : '#a259ff';
+    if (full) {
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur = 12 + Math.sin(performance.now()/80)*6;
+    }
+    ctx.fillRect(efillX, 74, ew, eBarH);
+    ctx.restore();
+
+    if (full) {
+      ctx.save();
+      ctx.font = 'bold 10px Courier New';
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = alignRight ? 'right' : 'left';
+      ctx.globalAlpha = 0.7 + Math.sin(performance.now()/100)*0.3;
+      ctx.fillText('SPECIAL READY!', alignRight ? x + barW : x, 96);
+      ctx.restore();
+    }
+  }
+
+  function drawTimer(){
+    ctx.save();
+    ctx.font = 'bold 40px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = '#00eaff';
+    ctx.shadowBlur = 14;
+    ctx.fillText(String(Math.ceil(timeLeft)), CANVAS_W/2, 62);
+    ctx.restore();
+  }
+
+  function drawUI(){
+    drawHpBar(p1, 20, false);
+    drawHpBar(p2, CANVAS_W - 20 - 340, true);
+    drawTimer();
+  }
+
+  function render(){
+    ctx.save();
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+    const sx = (Math.random() - 0.5) * shakeMag;
+    const sy = (Math.random() - 0.5) * shakeMag;
+    ctx.translate(sx, sy);
+
+    drawBackground();
+    drawGround();
+    drawFighter(p1);
+    drawFighter(p2);
+    drawProjectiles();
+    drawParticles();
+    drawComboTexts();
+
+    ctx.restore();
+    drawUI();
+  }
+
+  // ============================================================
+  //  GAME LOOP
+  // ============================================================
+  let lastTime = performance.now();
+  function loop(now){
+    const dt = Math.min((now - lastTime) / 1000, 0.033);
+    lastTime = now;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
